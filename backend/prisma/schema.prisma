@@ -7,7 +7,20 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-// Break-glass local owner (normal owner login comes from the ERP)
+// Sign-in accounts. Passwords are stored only as bcrypt hashes.
+// role OWNER: the organisation owner. role EMPLOYEE: linked to one Employee profile (name, face, attendance...).
+model User {
+  id           String   @id @default(auto()) @map("_id") @db.ObjectId
+  username     String   @unique // lower case
+  passwordHash String
+  role         String   // OWNER | EMPLOYEE
+  employeeId   String?  @unique @db.ObjectId
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  lastLoginAt  DateTime?
+}
+
+// Legacy (before the User collection existed). Only read once to copy the old owner into User.
 model Owner {
   id           String @id @default(auto()) @map("_id") @db.ObjectId
   username     String @unique

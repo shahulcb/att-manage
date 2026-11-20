@@ -9,22 +9,25 @@ cd backend
 cp .env.example .env        # set JWT_SECRET, OWNER_PASSWORD
 npm install
 npx prisma db push
-npm run seed                # creates owner, demo staff and attendance, and points login at the built-in MOCK ERP
+npm run seed                # creates demo employees, their accounts and sample attendance (never overwrites existing settings)
 npm run dev                 # http://localhost:4000
 npm test                    # end-to-end smoke tests (wipes the dev DB! re-run `npm run seed` after)
 ```
-Owner login: `owner` / `owner123` (change in `.env` before first run). Seeded mock ERP logins: owner `boss` / `admin123`; employees `asha`, `ravi`, `meena`, ... / `pass123`.
+Accounts are stored in the database (`User` collection, bcrypt hashes). `npm run seed` creates the owner (`owner`) and 12 demo employees
+(`asha`, `ravi`, `meena`, ...) and prints the generated password once. Set your own with `SEED_PASSWORD=...` (employees) and `SEED_OWNER_PASSWORD=...`.
+Nothing is hardcoded. The owner adds real employees in the app (Employees tab, + button).
 
 ## Run the app
 ```bash
 cd mobile
 flutter run                 # emulator: server defaults to http://10.0.2.2:4000/api
 ```
-On a real phone, tap the plug icon on the login screen and enter `http://<your-computer-LAN-IP>:4000/api`.
+The server address is fixed when the app is built: `flutter run --dart-define=API_BASE=http://<your-computer-LAN-IP>:4000/api` (over USB: `adb reverse tcp:4000 tcp:4000` and `http://localhost:4000/api`).
 Use HTTPS in production (cleartext is enabled only for development).
 
-## Connecting the real ERP
-Only the **login** is connected to the ERP. Users sign in with their ERP username and password; an employee record is created on first login (name and department come from the ERP login response). The ERP login settings (URL, field names, user path, owner roles, mapping) live in the database, not in the app. There is no employee-list sync.
+## Accounts and the (optional) company ERP
+Sign-in uses the `User` collection in MongoDB (username + bcrypt hash). The owner creates employees in the app (Employees tab, + button), can reset a password (a generated one is shown once) and can deactivate an account.
+A company ERP login can optionally be added later by setting `erpLoginUrl` (and its field mapping) in the database `Settings` document. It is only asked for usernames that do not exist locally, and it is off while `erpLoginUrl` is empty.
 
 ## Rules implemented
 - One office location + radius (default 100 m, adjustable); GPS verified on the server too

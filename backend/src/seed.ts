@@ -1,11 +1,12 @@
 import './env';
 import { prisma, getSettings } from './db';
 import { ensureOwner } from './bootstrap';
-import { MOCK_EMPLOYEES } from './mockData';
+import { DEMO_EMPLOYEES } from './demoData';
+import bcrypt from 'bcryptjs';
+import { randomBytes } from 'node:crypto';
 import { localParts, hhmm } from './util';
 import { countLeaveDays } from './leave';
 
-const port = process.env.PORT || 4000;
 const rnd = (a: number, b: number) => Math.floor(a + Math.random() * (b - a + 1));
 
 // org-local date + minutes-of-day -> UTC Date
@@ -16,23 +17,38 @@ function toUtc(date: string, minutes: number, tz: string) {
   return new Date(guess.getTime() + diff * 60000);
 }
 
+const readable = (n: number) => { const c = 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'; return Array.from(randomBytes(n), b => c[b % c.length]).join(''); };
+
 (async () => {
   await ensureOwner();
-  await getSettings();
-  const s = await prisma.settings.update({
-    where: { id: 'main' },
-    data: {
-      orgName: 'Demo Company', officeLat: 12.9716, officeLng: 77.5946, // placeholder: change in the owner app
-      erpLoginUrl: `http://localhost:${port}/api/mock-erp/login`, erpUserPath: 'user', erpOwnerRoles: 'admin',
-    },
-  });
+  let s = await getSettings();
+  // never overwrite settings that someone already changed: only fill in an empty office location
+  if (s.officeLat == null) {
+    s = await prisma.settings.update({ where: { id: 'main' }, data: { orgName: 'Demo Company', officeLat: 12.9716, officeLng: 77.5946 } }); // placeholder: set the real one in the owner app
+  }
 
+  // the owner keeps their password, except when it is still the well-known default: then give them a fresh one
+  const created: string[] = [];
+  const owner = await prisma.user.findFirst({ where: { role: 'OWNER' } });
+  let ownerPw = '';
+  if (owner && (await bcrypt.compare('owner123', owner.passwordHash))) {
+    ownerPw = process.env.SEED_OWNER_PASSWORD || readable(14);
+    await prisma.user.update({ where: { id: owner.id }, data: { passwordHash: await bcrypt.hash(ownerPw, 10) } });
+  }
+
+  const sharedPw = process.env.SEED_PASSWORD || readable(10);
+  const hash = await bcrypt.hash(sharedPw, 10);
   const emps: { id: string }[] = [];
-  for (const m of MOCK_EMPLOYEES) {
-    emps.push(await prisma.employee.upsert({
-      where: { externalId: m.id }, update: { name: m.name },
+  for (const m of DEMO_EMPLOYEES) {
+    const e = await prisma.employee.upsert({
+      where: { externalId: m.id }, update: {},
       create: { externalId: m.id, name: m.name, email: m.email, phone: m.phone, department: m.department },
-    }));
+    });
+    emps.push(e);
+    if (!(await prisma.user.findUnique({ where: { username: m.username } }))) {
+      await prisma.user.create({ data: { username: m.username, passwordHash: hash, role: 'EMPLOYEE', employeeId: e.id } });
+      created.push(m.username);
+    }
   }
 
   // ~3 weeks of random attendance (skips today and non-working days)
@@ -73,7 +89,9 @@ function toUtc(date: string, minutes: number, tz: string) {
   }
 
   console.log(`Seeded: owner + settings + ${emps.length} employees + ${rows} attendance rows`);
-  console.log('Logins (mock ERP):  owner -> boss / admin123   employees -> asha, ravi, meena, karthik, divya, imran, sneha, arjun, priya, vikram, lakshmi, rahul / pass123');
-  console.log('Local break-glass owner: owner / owner123');
+  console.log(`Accounts created now: ${created.length ? created.join(', ') : 'none (all already existed; their passwords were not changed)'}`);
+  if (created.length) console.log(`Password for those ${created.length} employee accounts: ${sharedPw}`);
+  if (ownerPw) console.log(`Owner account "${owner!.username}" password was reset to: ${ownerPw}`);
+  else console.log('Owner account password unchanged.');
   await prisma.$disconnect();
 })().catch(e => { console.error(e); process.exit(1); });

@@ -11,7 +11,6 @@ import { state as localOwnerState } from './bootstrap';
 import { bestScore, bestOther, validEmbedding, invalidateFaces } from './faceIndex';
 import { cosine } from './util';
 import { countLeaveDays, checkQuota, allBalances, balanceFor, leaveYearOf, leaveYearLabel, LEAVE_TYPES } from './leave';
-import { MOCK_EMPLOYEES, MOCK_OWNER, MOCK_EMP_PASSWORD, MOCK_OWNER_PASSWORD } from './mockData';
 
 export const router = Router();
 const owner = requireRole('owner'), emp = requireRole('employee');
@@ -21,34 +20,41 @@ const publicEmp = (e: any) => ({ id: e.id, externalId: e.externalId, name: e.nam
 const publicCfg = (s: any) => ({ leaveQuotaEnabled: s.leaveQuotaEnabled, leaveYearStartMonth: s.leaveYearStartMonth, lunchStart: s.lunchStart, lunchEnd: s.lunchEnd, lunchMinutes: s.lunchMinutes, orgName: s.orgName, officeLat: s.officeLat, officeLng: s.officeLng, radiusM: s.radiusM, workStart: s.workStart, workEnd: s.workEnd, graceMinutes: s.graceMinutes, workDays: s.workDays, timezone: s.timezone, maxAccuracyM: s.maxAccuracyM });
 
 // ---------- auth ----------
-// One login form. Credentials are verified by the main ERP; the ERP role decides Owner vs Employee.
+// Accounts live in the User collection (username + bcrypt hash). The company ERP is only a fallback for unknown usernames
+// and only when an ERP address has been configured.
+const DUMMY_HASH = bcrypt.hashSync('not-a-real-password', 10); // equalises timing when the username does not exist
 router.post('/auth/login', wrap(async (req, res) => {
   const b = z.object({ identifier: z.string().min(1).max(200), password: z.string().min(1).max(200) }).parse(req.body);
-  const key = `${req.ip}|${b.identifier.toLowerCase()}`;
+  const username = b.identifier.trim().toLowerCase();
+  const key = `${req.ip}|${username}`;
   checkLoginAllowed(key);
+  const bad = () => { recordLoginFail(key); return new HttpError(401, 'BAD_CREDENTIALS', 'Wrong username or password'); };
 
-  const localOwner = async () => {
-    if (localOwnerState.localOwnerLocked) return null; // default password in production: refused
-    const o = await prisma.owner.findUnique({ where: { username: b.identifier } });
-    return o && (await bcrypt.compare(b.password, o.passwordHash)) ? o : null;
-  };
-
-  let user;
-  try { user = await erpLogin(b.identifier, b.password); }
-  catch (e: any) {
-    // break-glass: local owner account works if the ERP is down / not configured
-    if (e instanceof HttpError && ['BAD_CREDENTIALS', 'ERP_UNAVAILABLE', 'ERP_NOT_CONFIGURED'].includes(e.code)) {
-      const o = await localOwner();
-      if (o) { clearLoginFails(key); return res.json({ token: sign({ role: 'owner', id: o.id }), role: 'owner', name: 'Owner' }); }
-      if (e.code === 'BAD_CREDENTIALS') recordLoginFail(key);
+  const u = await prisma.user.findUnique({ where: { username } });
+  if (u || !(await prisma.settings.findUnique({ where: { id: 'main' } }))?.erpLoginUrl) {
+    const ok = await bcrypt.compare(b.password, u ? u.passwordHash : DUMMY_HASH);
+    if (!u || !ok) throw bad();
+    if (!u.active) throw new HttpError(403, 'INACTIVE', 'Your account is deactivated. Contact the owner.');
+    clearLoginFails(key);
+    if (u.role === 'OWNER') {
+      if (localOwnerState.localOwnerLocked) throw new HttpError(403, 'OWNER_LOCKED', 'Owner sign-in is disabled until a strong OWNER_PASSWORD is set on the server.');
+      await prisma.user.update({ where: { id: u.id }, data: { lastLoginAt: new Date() } });
+      return res.json({ token: sign({ role: 'owner', id: u.id }), role: 'owner', name: 'Owner' });
     }
-    throw e;
+    const e = u.employeeId ? await prisma.employee.findUnique({ where: { id: u.employeeId } }) : null;
+    if (!e) throw new HttpError(403, 'NO_PROFILE', 'This account has no employee profile. Contact the owner.');
+    if (!e.active) throw new HttpError(403, 'INACTIVE', 'Your account is deactivated. Contact the owner.');
+    await prisma.user.update({ where: { id: u.id }, data: { lastLoginAt: new Date() } });
+    return res.json({ token: sign({ role: 'employee', id: e.id }), role: 'employee', name: e.name });
   }
+
+  // unknown username and an ERP is configured: ask the ERP
+  let user;
+  try { user = await erpLogin(username, b.password); }
+  catch (e: any) { if (e instanceof HttpError && e.code === 'BAD_CREDENTIALS') throw bad(); throw e; }
   clearLoginFails(key);
   if (!user.active) throw new HttpError(403, 'INACTIVE', 'Your account is deactivated in the company system.');
   if (user.isOwner) return res.json({ token: sign({ role: 'owner', id: 'erp:' + user.externalId }), role: 'owner', name: user.name });
-
-  // employee: create on first login, keep profile in sync with ERP
   const e = await prisma.employee.upsert({
     where: { externalId: user.externalId },
     update: { name: user.name, email: user.email, department: user.department, active: true },
@@ -226,7 +232,56 @@ router.put('/owner/settings', owner, wrap(async (req, res) => {
 }));
 
 router.get('/owner/employees', owner, wrap(async (_req, res) => {
-  res.json((await prisma.employee.findMany({ orderBy: { name: 'asc' } })).map(publicEmp));
+  const list = await prisma.employee.findMany({ orderBy: { name: 'asc' } });
+  const users = await prisma.user.findMany({ where: { employeeId: { in: list.map(e => e.id) } }, select: { employeeId: true, username: true } });
+  res.json(list.map(e => ({ ...publicEmp(e), username: users.find(u => u.employeeId === e.id)?.username ?? null })));
+}));
+
+const randomPassword = () => { const c = 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'; return Array.from({ length: 10 }, () => c[Math.floor(Math.random() * c.length)]).join(''); };
+
+// create an employee together with their sign-in account
+router.post('/owner/employees', owner, wrap(async (req, res) => {
+  const b = z.object({
+    name: z.string().trim().min(2).max(80), username: z.string().trim().toLowerCase().regex(/^[a-z0-9._-]{3,30}$/, 'Username: 3-30 letters, numbers, . _ -'),
+    password: z.string().min(8, 'Password must be at least 8 characters').max(100).optional(),
+    externalId: z.string().trim().regex(/^[A-Za-z0-9_-]{1,20}$/, 'Employee ID: letters, numbers, - _').optional(),
+    department: z.string().trim().max(60).default(''), email: z.string().trim().max(120).default(''), phone: z.string().trim().max(30).default(''),
+  }).parse(req.body);
+  if (await prisma.user.findUnique({ where: { username: b.username } })) throw new HttpError(409, 'USERNAME_TAKEN', 'That username is already used');
+  let externalId = b.externalId;
+  if (!externalId) {
+    const nums = (await prisma.employee.findMany({ select: { externalId: true } })).map(e => /^E(\d+)$/.exec(e.externalId)).filter(Boolean).map(m => Number(m![1]));
+    externalId = 'E' + String((nums.length ? Math.max(...nums) : 0) + 1).padStart(3, '0');
+  }
+  if (await prisma.employee.findUnique({ where: { externalId } })) throw new HttpError(409, 'ID_TAKEN', 'That employee ID is already used');
+  const password = b.password ?? randomPassword();
+  const created = await prisma.$transaction(async tx => {
+    const e = await tx.employee.create({ data: { externalId: externalId!, name: b.name, email: b.email, phone: b.phone, department: b.department } });
+    await tx.user.create({ data: { username: b.username, passwordHash: await bcrypt.hash(password, 10), role: 'EMPLOYEE', employeeId: e.id } });
+    return e;
+  });
+  await audit('EMPLOYEE_CREATED', { employeeId: created.id, username: b.username });
+  res.json({ employee: publicEmp(created), username: b.username, password: b.password ? undefined : password }); // a generated password is shown only now
+}));
+
+router.post('/owner/employees/:id/reset-password', owner, wrap(async (req, res) => {
+  const b = z.object({ password: z.string().min(8).max(100).optional() }).parse(req.body ?? {});
+  const u = await prisma.user.findUnique({ where: { employeeId: String(req.params.id) } });
+  if (!u) throw new HttpError(404, 'NO_ACCOUNT', 'This employee has no sign-in account');
+  const password = b.password ?? randomPassword();
+  await prisma.user.update({ where: { id: u.id }, data: { passwordHash: await bcrypt.hash(password, 10) } });
+  await audit('PASSWORD_RESET', { employeeId: u.employeeId });
+  res.json({ username: u.username, password: b.password ? undefined : password });
+}));
+
+router.post('/owner/employees/:id/active', owner, wrap(async (req, res) => {
+  const b = z.object({ active: z.boolean() }).parse(req.body);
+  const id = String(req.params.id);
+  await prisma.employee.update({ where: { id }, data: { active: b.active } });
+  await prisma.user.updateMany({ where: { employeeId: id }, data: { active: b.active } });
+  invalidateFaces();
+  await audit(b.active ? 'EMPLOYEE_ACTIVATED' : 'EMPLOYEE_DEACTIVATED', { employeeId: id });
+  res.json({ ok: true });
 }));
 router.post('/owner/employees/:id/reset-face', owner, wrap(async (req, res) => {
   const id = String(req.params.id);
@@ -392,18 +447,3 @@ async function monthly(month: string) {
 }
 
 router.post('/owner/run-absent-check', owner, wrap(async (req, res) => res.json({ marked: await markAbsentees(req.body?.date) })));
-
-// ---------- MOCK ERP login (stand-in for the real ERP until its API is known) ----------
-// The mock ERP exists only for development/demos. In production it is OFF unless ENABLE_MOCK_ERP=true,
-// because its demo accounts (including an "owner") would otherwise be usable by anyone on the internet.
-if (process.env.ENABLE_MOCK_ERP === 'true' || process.env.NODE_ENV !== 'production') {
-router.post('/mock-erp/login', (req, res) => {
-  const name = String(req.body?.username || '').toLowerCase();
-  const pw = req.body?.password;
-  const owner = name === MOCK_OWNER.username && pw === MOCK_OWNER_PASSWORD ? MOCK_OWNER : null;
-  const emp = MOCK_EMPLOYEES.find(e => e.username === name && pw === MOCK_EMP_PASSWORD);
-  const u = owner ?? emp;
-  if (!u) return res.status(401).json({ error: 'invalid credentials' });
-  res.json({ token: 'mock-erp-session', user: { id: u.id, name: u.name, email: u.email, role: u.role, department: u.department, active: u.active } });
-});
-}

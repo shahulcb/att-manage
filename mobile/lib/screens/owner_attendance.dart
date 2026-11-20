@@ -116,10 +116,10 @@ class _OwnerAttendanceState extends State<OwnerAttendance> {
       if (loading) const SkeletonList()
       else if (error != null) StateView(icon: Icons.cloud_off_rounded, title: 'Could not load', message: error, actionLabel: 'Try again', onAction: load)
       else if (monthly) ...[
-        if (summary.isEmpty) const StateView(icon: Icons.groups_rounded, title: 'No employees yet', message: 'They appear after their first login.'),
+        if (summary.isEmpty) const StateView(icon: Icons.groups_rounded, title: 'No employees yet', message: 'Add them from the Employees tab.'),
         for (final (i, r) in summary.indexed) _monthTile(r).reveal(i),
       ]
-      else if (shown.isEmpty) StateView(icon: Icons.search_off_rounded, title: rows.isEmpty ? 'No employees yet' : 'Nothing matches', message: rows.isEmpty ? 'They appear after their first login.' : 'Try another filter or search.')
+      else if (shown.isEmpty) StateView(icon: Icons.search_off_rounded, title: rows.isEmpty ? 'No employees yet' : 'Nothing matches', message: rows.isEmpty ? 'Add them from the Employees tab.' : 'Try another filter or search.')
       else for (final (i, r) in shown.indexed) _tile(r).reveal(i),
     ]);
   }

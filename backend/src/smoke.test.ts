@@ -31,24 +31,53 @@ async function call(method: string, path: string, body?: any, token?: string) {
   await ensureOwner();
   const srv = app.listen(0); base = `http://localhost:${(srv.address() as any).port}/api`;
 
-  // ---- ERP login ----
-  assert.equal((await call('POST', '/auth/login', { identifier: 'asha', password: 'pass123' })).json.code, 'ERP_NOT_CONFIGURED');
-  const o = await call('POST', '/auth/login', { identifier: 'owner', password: 'owner123' }); // break-glass local owner
+  // ---- accounts live in the User collection ----
+  assert.equal((await call('POST', '/auth/login', { identifier: 'asha', password: 'Pass1234' })).json.code, 'BAD_CREDENTIALS', 'unknown user');
+  const o = await call('POST', '/auth/login', { identifier: 'owner', password: 'owner123' }); // dev default owner
   assert.equal(o.status, 200); const ot = o.json.token;
-  const cfgRes = await call('PUT', '/owner/settings', { erpLoginUrl: `${base}/mock-erp/login`, erpOwnerRoles: 'admin', erpUserPath: 'user' }, ot);
-  assert.equal(cfgRes.status, 200);
-  const boss = await call('POST', '/auth/login', { identifier: 'boss', password: 'admin123' });
-  assert.equal(boss.json.role, 'owner', 'ERP admin becomes owner: ' + JSON.stringify(boss));
-  assert.equal((await call('GET', '/owner/dashboard', undefined, boss.json.token)).status, 200);
-  assert.equal((await call('POST', '/auth/login', { identifier: 'asha', password: 'wrong' })).json.code, 'BAD_CREDENTIALS');
-  assert.equal((await call('GET', '/owner/dashboard', undefined, (await call('POST', '/auth/login', { identifier: 'asha', password: 'pass123' })).json.token)).status, 401, 'employee cannot use owner API');
+  assert.equal((await call('POST', '/auth/login', { identifier: 'OWNER', password: 'owner123' })).status, 200, 'usernames are case-insensitive');
+  assert.equal((await call('POST', '/auth/login', { identifier: 'owner', password: 'wrong' })).json.code, 'BAD_CREDENTIALS');
+  assert.equal(await prisma.user.count({ where: { role: 'OWNER' } }), 1);
   await call('PUT', '/owner/settings', { officeLat: 12.9716, officeLng: 77.5946, radiusM: 100, workStart: '00:00', workEnd: '23:59', graceMinutes: 0, workDays: '0,1,2,3,4,5,6', lunchStart: '00:00', lunchEnd: '00:01', lunchMinutes: 60 }, ot);
-  // employees are created on first ERP login; pre-create the rest of the demo staff directly
-  const { MOCK_EMPLOYEES } = await import('./mockData');
-  for (const m of MOCK_EMPLOYEES.filter(x => x.username !== 'asha')) await prisma.employee.upsert({ where: { externalId: m.id }, update: {}, create: { externalId: m.id, name: m.name, email: m.email, department: m.department } });
-  assert.equal((await call('POST', '/owner/sync', {}, ot)).status, 404, 'manual sync endpoint is gone');
 
-  const l = await call('POST', '/auth/login', { identifier: 'asha', password: 'pass123' });
+  // owner creates employees (profile + sign-in account)
+  const bcrypt = (await import('bcryptjs')).default;
+  const { DEMO_EMPLOYEES } = await import('./demoData');
+  const mk = await call('POST', '/owner/employees', { name: 'Asha Kumar', username: 'Asha', password: 'Pass1234', department: 'Sales' }, ot);
+  assert.equal(mk.status, 200, JSON.stringify(mk.json)); assert.equal(mk.json.username, 'asha'); assert.equal(mk.json.employee.externalId, 'E001', 'next employee id is automatic');
+  assert.equal(mk.json.password, undefined, 'a password the owner typed is not echoed back');
+  assert.equal((await call('POST', '/owner/employees', { name: 'Dup', username: 'asha', password: 'Pass1234' }, ot)).json.code, 'USERNAME_TAKEN');
+  assert.equal((await call('POST', '/owner/employees', { name: 'Short', username: 'shorty', password: '123' }, ot)).status, 400, 'password too short');
+  assert.equal((await call('POST', '/owner/employees', { name: 'Bad Name', username: 'a b', password: 'Pass1234' }, ot)).status, 400, 'username characters');
+  assert.equal((await call('POST', '/owner/employees', { name: 'Same Id', username: 'sameid', password: 'Pass1234', externalId: 'E001' }, ot)).json.code, 'ID_TAKEN');
+  assert.equal((await call('POST', '/owner/employees', { name: 'Nobody', username: 'nobody', password: 'Pass1234' }, tok)).status, 401, 'employees cannot create accounts');
+  // the rest of the demo staff, straight into the database (as the seed script does)
+  for (const m of DEMO_EMPLOYEES.filter(x => x.username !== 'asha')) {
+    const e = await prisma.employee.create({ data: { externalId: m.id, name: m.name, email: m.email, department: m.department } });
+    await prisma.user.create({ data: { username: m.username, passwordHash: await bcrypt.hash('Pass1234', 4), role: 'EMPLOYEE', employeeId: e.id } });
+  }
+  assert.equal((await call('POST', '/owner/sync', {}, ot)).status, 404, 'manual sync endpoint is gone');
+  assert.equal((await call('POST', '/auth/login', { identifier: 'boss', password: 'admin123' })).json.code, 'BAD_CREDENTIALS', 'there are no built-in demo accounts');
+  assert.equal((await call('GET', '/mock-erp/login')).status, 404, 'mock ERP is gone');
+
+  // generated passwords, reset and deactivate
+  const gen = await call('POST', '/owner/employees', { name: 'Temp Person', username: 'temp.person' }, ot);
+  assert.equal(gen.status, 200); assert.equal(gen.json.password.length, 10, 'a generated password is shown once');
+  assert.equal((await call('POST', '/auth/login', { identifier: 'temp.person', password: gen.json.password })).status, 200);
+  const rp = await call('POST', `/owner/employees/${gen.json.employee.id}/reset-password`, {}, ot);
+  assert.equal(rp.status, 200); assert.notEqual(rp.json.password, gen.json.password);
+  assert.equal((await call('POST', '/auth/login', { identifier: 'temp.person', password: gen.json.password })).json.code, 'BAD_CREDENTIALS', 'old password stops working');
+  assert.equal((await call('POST', '/auth/login', { identifier: 'temp.person', password: rp.json.password })).status, 200);
+  assert.equal((await call('POST', `/owner/employees/${gen.json.employee.id}/active`, { active: false }, ot)).status, 200);
+  assert.equal((await call('POST', '/auth/login', { identifier: 'temp.person', password: rp.json.password })).json.code, 'INACTIVE', 'deactivated accounts cannot sign in');
+  assert.equal((await call('POST', `/owner/employees/${gen.json.employee.id}/active`, { active: true }, ot)).status, 200);
+  assert.equal((await call('POST', '/auth/login', { identifier: 'temp.person', password: rp.json.password })).status, 200);
+  assert.equal((await call('POST', `/owner/employees/${gen.json.employee.id}/active`, { active: false }, ot)).status, 200); // keep the absent count below unchanged
+  const list = await call('GET', '/owner/employees', undefined, ot);
+  assert.equal(list.json.find((x: any) => x.externalId === 'E001').username, 'asha', 'owner list shows usernames');
+  assert.equal((await call('GET', '/owner/dashboard', undefined, (await call('POST', '/auth/login', { identifier: 'asha', password: 'Pass1234' })).json.token)).status, 401, 'employee cannot use owner API');
+
+  const l = await call('POST', '/auth/login', { identifier: 'asha', password: 'Pass1234' });
   assert.equal(l.status, 200); tok = l.json.token;
   const here = { lat: 12.9716, lng: 77.5946, accuracy: 10, isMock: false };
 
@@ -70,12 +99,12 @@ async function call(method: string, path: string, body?: any, token?: string) {
   assert.equal((await call('POST', '/me/face/register', { embeddings: reg(1) }, tok)).json.code, 'FACE_EXISTS');
 
   // ---- registration quality rules ----
-  const imran = (await call('POST', '/auth/login', { identifier: 'imran', password: 'pass123' })).json.token;
+  const imran = (await call('POST', '/auth/login', { identifier: 'imran', password: 'Pass1234' })).json.token;
   assert.equal((await call('POST', '/me/face/register', { embeddings: reg(5, 3) }, imran)).status, 400, 'needs at least 4 samples');
   assert.equal((await call('POST', '/me/face/register', { embeddings: [...reg(5, 3), ...reg(9, 3)] }, imran)).json.code, 'REGISTRATION_INCONSISTENT', 'mixed people');
   assert.equal((await call('POST', '/me/face/register', { embeddings: reg(emb(5).map(x => x * 2)) }, imran)).json.code, 'BAD_FACE_DATA', 'not a unit vector');
   assert.equal((await call('POST', '/me/face/register', { embeddings: reg([1, 2, 3]) }, imran)).json.code, 'BAD_FACE_DATA', 'wrong length');
-  const raviT = (await call('POST', '/auth/login', { identifier: 'ravi', password: 'pass123' })).json.token;
+  const raviT = (await call('POST', '/auth/login', { identifier: 'ravi', password: 'Pass1234' })).json.token;
   assert.equal((await call('POST', '/me/face/register', { embeddings: reg(3) }, raviT)).status, 200);
   const raviRow = await prisma.employee.findUniqueOrThrow({ where: { externalId: 'E002' } });
   assert.equal((await call('POST', `/owner/face-registrations/${raviRow.id}/approve`, {}, ot)).status, 200);
@@ -130,7 +159,7 @@ async function call(method: string, path: string, body?: any, token?: string) {
 
   // ---- leave ----
   const day = (n: number) => new Date(Date.now() + n * 86400000).toISOString().slice(0, 10);
-  const ravi = (await call('POST', '/auth/login', { identifier: 'ravi', password: 'pass123' })).json.token;
+  const ravi = (await call('POST', '/auth/login', { identifier: 'ravi', password: 'Pass1234' })).json.token;
   const L = (b: any, t = ravi) => call('POST', '/me/leaves', b, t);
   assert.equal((await L({ fromDate: day(5), toDate: day(4), reason: 'trip' })).status, 400, 'end before start');
   assert.equal((await L({ fromDate: day(3), toDate: day(4), reason: 'a' })).status, 400, 'reason required');
@@ -160,7 +189,7 @@ async function call(method: string, path: string, body?: any, token?: string) {
   await call('POST', `/owner/leaves/${lv2.id}/revoke`, { note: 'needed at work' }, ot);
   assert.equal(await prisma.attendance.count({ where: { employeeId: raviEmp.id, date: day(3) } }), 0, 'revoke removes the not-yet-happened LEAVE row');
   // a person on leave today cannot punch
-  const meena = (await call('POST', '/auth/login', { identifier: 'meena', password: 'pass123' })).json.token;
+  const meena = (await call('POST', '/auth/login', { identifier: 'meena', password: 'Pass1234' })).json.token;
   await call('POST', '/me/face/register', { embeddings: reg(2) }, meena);
   const meenaEmp = await prisma.employee.findUniqueOrThrow({ where: { externalId: 'E003' } });
   await call('POST', `/owner/face-registrations/${meenaEmp.id}/approve`, {}, ot);
@@ -173,7 +202,7 @@ async function call(method: string, path: string, body?: any, token?: string) {
   assert.equal((await prisma.attendance.findUniqueOrThrow({ where: { employeeId_date: { employeeId: meenaEmp.id, date: todayStr } } })).status, 'LEAVE', 'approved leave for today shows as LEAVE');
 
   // ---- leave quota + half day ----
-  const divya = (await call('POST', '/auth/login', { identifier: 'divya', password: 'pass123' })).json.token;
+  const divya = (await call('POST', '/auth/login', { identifier: 'divya', password: 'Pass1234' })).json.token;
   const D = (b: any, t = divya) => call('POST', '/me/leaves', b, t);
   const bal = async () => (await call('GET', '/me/leave-balance', undefined, divya)).json;
   assert.equal((await bal()).quotaEnabled, false, 'quota is off by default');
@@ -224,8 +253,8 @@ async function call(method: string, path: string, body?: any, token?: string) {
   assert.equal(JSON.parse((await prisma.employee.findUniqueOrThrow({ where: { id: raviEmp2.id } })).faceData).length, 7, 'new look stored');
 
   // ---- look-alikes: two employees whose faces are almost identical ----
-  const sneha = (await call('POST', '/auth/login', { identifier: 'sneha', password: 'pass123' })).json.token;
-  const arjun = (await call('POST', '/auth/login', { identifier: 'arjun', password: 'pass123' })).json.token;
+  const sneha = (await call('POST', '/auth/login', { identifier: 'sneha', password: 'Pass1234' })).json.token;
+  const arjun = (await call('POST', '/auth/login', { identifier: 'arjun', password: 'Pass1234' })).json.token;
   await call('POST', '/me/face/register', { embeddings: reg(11) }, sneha);
   const snehaRow = await prisma.employee.findUniqueOrThrow({ where: { externalId: 'E007' } });
   await call('POST', `/owner/face-registrations/${snehaRow.id}/approve`, {}, ot);
@@ -246,6 +275,24 @@ async function call(method: string, path: string, body?: any, token?: string) {
   // absent marking for today: everyone without a record (asha + ravi punched, meena on leave) -> 9
   assert.equal(await markAbsentees(), 9);
 
+  // ---- optional company ERP: only for unknown usernames, only when an address is configured ----
+  const http = await import('node:http');
+  const erp = http.createServer((rq, rs) => {
+    let b = ''; rq.on('data', d => (b += d));
+    rq.on('end', () => {
+      if (JSON.parse(b || '{}').password === 'erp-pass') { rs.setHeader('content-type', 'application/json'); rs.end(JSON.stringify({ user: { id: 'X9', name: 'Zed Erp', role: 'employee', department: 'Ops', active: true } })); }
+      else { rs.statusCode = 401; rs.end('{}'); }
+    });
+  }).listen(0);
+  const erpUrl = `http://localhost:${(erp.address() as any).port}/login`;
+  assert.equal((await call('POST', '/auth/login', { identifier: 'zed', password: 'erp-pass' })).json.code, 'BAD_CREDENTIALS', 'no ERP configured: unknown user refused');
+  assert.equal((await call('PUT', '/owner/settings', { erpLoginUrl: erpUrl, erpUserPath: 'user', erpOwnerRoles: 'admin' }, ot)).status, 200);
+  const zed = await call('POST', '/auth/login', { identifier: 'zed', password: 'erp-pass' });
+  assert.equal(zed.status, 200); assert.equal(zed.json.name, 'Zed Erp');
+  assert.equal((await call('POST', '/auth/login', { identifier: 'zed', password: 'nope' })).json.code, 'BAD_CREDENTIALS');
+  assert.equal((await call('POST', '/auth/login', { identifier: 'asha', password: 'wrong' })).json.code, 'BAD_CREDENTIALS', 'local users never fall through to the ERP');
+  erp.close(); await call('PUT', '/owner/settings', { erpLoginUrl: '' }, ot);
+
   const csv = await call('GET', `/owner/report/export.csv?month=${new Date().toISOString().slice(0, 7)}`, undefined, ot);
   assert.equal(csv.status, 200);
   // ---- production start: never crashes, never leaves owner/owner123 open ----
@@ -253,7 +300,7 @@ async function call(method: string, path: string, body?: any, token?: string) {
   const oldEnv = process.env.NODE_ENV, oldPw = process.env.OWNER_PASSWORD;
   process.env.NODE_ENV = 'production'; delete process.env.OWNER_PASSWORD;
   await boot2(); // no OWNER_PASSWORD: must still start
-  assert.equal((await call('POST', '/auth/login', { identifier: 'owner', password: 'owner123' })).status, 401, 'default owner password is refused in production');
+  assert.equal((await call('POST', '/auth/login', { identifier: 'owner', password: 'owner123' })).json.code, 'OWNER_LOCKED', 'default owner password is refused in production');
   process.env.OWNER_PASSWORD = 'a-much-stronger-pw-1';
   await boot2(); // strong password given: stored password is updated and login re-enabled
   assert.equal((await call('POST', '/auth/login', { identifier: 'owner', password: 'a-much-stronger-pw-1' })).status, 200, 'owner can log in with OWNER_PASSWORD');
