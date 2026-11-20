@@ -392,6 +392,9 @@ async function monthly(month: string) {
 router.post('/owner/run-absent-check', owner, wrap(async (req, res) => res.json({ marked: await markAbsentees(req.body?.date) })));
 
 // ---------- MOCK ERP login (stand-in for the real ERP until its API is known) ----------
+// The mock ERP exists only for development/demos. In production it is OFF unless ENABLE_MOCK_ERP=true,
+// because its demo accounts (including an "owner") would otherwise be usable by anyone on the internet.
+if (process.env.ENABLE_MOCK_ERP === 'true' || process.env.NODE_ENV !== 'production') {
 router.post('/mock-erp/login', (req, res) => {
   const name = String(req.body?.username || '').toLowerCase();
   const pw = req.body?.password;
@@ -401,3 +404,4 @@ router.post('/mock-erp/login', (req, res) => {
   if (!u) return res.status(401).json({ error: 'invalid credentials' });
   res.json({ token: 'mock-erp-session', user: { id: u.id, name: u.name, email: u.email, role: u.role, department: u.department, active: u.active } });
 });
+}

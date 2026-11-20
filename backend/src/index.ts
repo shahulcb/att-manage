@@ -22,7 +22,7 @@ if (require.main === module) {
   const boot = async () => {
     for (let i = 1; ; i++) {
       try { await ensureOwner(); return; }
-      catch (e: any) { console.error(`database not reachable (attempt ${i}):`, String(e.message).split('\n').pop()); if (i >= 20) throw e; await new Promise(r => setTimeout(r, 3000)); }
+      catch (e: any) { if (/must be set/.test(String(e.message))) throw e; /* bad configuration: fail fast, do not retry */ console.error(`database not reachable (attempt ${i}):`, String(e.message).split('\n').pop()); if (i >= 20) throw e; await new Promise(r => setTimeout(r, 3000)); }
     }
   };
   boot().then(async () => {

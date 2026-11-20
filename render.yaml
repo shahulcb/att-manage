@@ -1,0 +1,22 @@
+# Render blueprint for the API. Create it with: Render dashboard -> New -> Blueprint -> pick this repo.
+services:
+  - type: web
+    name: attendance-api
+    runtime: node
+    rootDir: backend
+    plan: starter            # paid plan = never sleeps. Free plans spin down when idle.
+    buildCommand: npm ci     # runs `prisma generate` automatically (postinstall)
+    startCommand: npm start
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL    # mongodb+srv://USER:PASSWORD@CLUSTER/attendance?retryWrites=true&w=majority
+        sync: false
+      - key: JWT_SECRET      # generated once by Render (random)
+        generateValue: true
+      - key: OWNER_USERNAME
+        value: owner
+      - key: OWNER_PASSWORD  # strong password (10+ chars) for the local break-glass owner
+        sync: false
