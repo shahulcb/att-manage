@@ -248,5 +248,16 @@ async function call(method: string, path: string, body?: any, token?: string) {
 
   const csv = await call('GET', `/owner/report/export.csv?month=${new Date().toISOString().slice(0, 7)}`, undefined, ot);
   assert.equal(csv.status, 200);
+  // ---- production start: never crashes, never leaves owner/owner123 open ----
+  const { ensureOwner: boot2 } = await import('./bootstrap');
+  const oldEnv = process.env.NODE_ENV, oldPw = process.env.OWNER_PASSWORD;
+  process.env.NODE_ENV = 'production'; delete process.env.OWNER_PASSWORD;
+  await boot2(); // no OWNER_PASSWORD: must still start
+  assert.equal((await call('POST', '/auth/login', { identifier: 'owner', password: 'owner123' })).status, 401, 'default owner password is refused in production');
+  process.env.OWNER_PASSWORD = 'a-much-stronger-pw-1';
+  await boot2(); // strong password given: stored password is updated and login re-enabled
+  assert.equal((await call('POST', '/auth/login', { identifier: 'owner', password: 'a-much-stronger-pw-1' })).status, 200, 'owner can log in with OWNER_PASSWORD');
+  assert.equal((await call('POST', '/auth/login', { identifier: 'owner', password: 'owner123' })).status, 401, 'old default no longer works');
+  process.env.NODE_ENV = oldEnv; if (oldPw === undefined) delete process.env.OWNER_PASSWORD; else process.env.OWNER_PASSWORD = oldPw;
   console.log('ALL SMOKE TESTS PASSED'); srv.close(); await prisma.$disconnect(); await mongo.stop();
 })().catch(e => { console.error(e); process.exit(1); });

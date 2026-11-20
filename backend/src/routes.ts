@@ -7,6 +7,7 @@ import { HttpError, wrap, localParts, hhmm } from './util';
 import { erpLogin, checkLoginAllowed, recordLoginFail, clearLoginFails } from './erp';
 import { processPunch, markAbsentees, leaveOn, eachDate, applyLeaveRows } from './punch';
 import { issueChallenge } from './challenge';
+import { state as localOwnerState } from './bootstrap';
 import { bestScore, bestOther, validEmbedding, invalidateFaces } from './faceIndex';
 import { cosine } from './util';
 import { countLeaveDays, checkQuota, allBalances, balanceFor, leaveYearOf, leaveYearLabel, LEAVE_TYPES } from './leave';
@@ -27,6 +28,7 @@ router.post('/auth/login', wrap(async (req, res) => {
   checkLoginAllowed(key);
 
   const localOwner = async () => {
+    if (localOwnerState.localOwnerLocked) return null; // default password in production: refused
     const o = await prisma.owner.findUnique({ where: { username: b.identifier } });
     return o && (await bcrypt.compare(b.password, o.passwordHash)) ? o : null;
   };
