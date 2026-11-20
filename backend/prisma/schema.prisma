@@ -1,0 +1,152 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mongodb"
+  url      = env("DATABASE_URL")
+}
+
+// Break-glass local owner (normal owner login comes from the ERP)
+model Owner {
+  id           String @id @default(auto()) @map("_id") @db.ObjectId
+  username     String @unique
+  passwordHash String
+}
+
+// Single-document organisation settings (_id = "main")
+model Settings {
+  id            String  @id @map("_id")
+  orgName       String  @default("My Organisation")
+  officeLat     Float?
+  officeLng     Float?
+  radiusM       Int     @default(100)
+  workStart     String  @default("09:00")
+  workEnd       String  @default("18:00")
+  graceMinutes  Int     @default(10)
+  workDays      String  @default("1,2,3,4,5") // 0=Sun..6=Sat
+  timezone      String  @default("Asia/Kolkata")
+  maxAccuracyM  Int     @default(50)
+  lunchStart    String  @default("13:00") // lunch exit allowed from
+  lunchEnd      String  @default("14:00") // ...until (window for taking the break)
+  lunchMinutes  Int     @default(60)      // allowed length of the break
+  holidays      String  @default("")      // comma separated YYYY-MM-DD
+  // ---- leave module (standalone, not synced with the ERP) ----
+  faceThreshold       Float   @default(0.65) // min cosine similarity to accept (higher = stricter)
+  faceMargin          Float   @default(0.05) // another employee must score at least this much lower
+  leaveQuotaEnabled   Boolean @default(false) // false = no quota (unlimited)
+  leaveQuotaCasual    Float   @default(12)
+  leaveQuotaSick      Float   @default(12)
+  leaveQuotaOther     Float   @default(0)     // 0 = not allowed when quota is on
+  leaveYearStartMonth Int     @default(1)     // 1 = Jan..12 = Dec
+
+  // ---- ERP: login (users sign in with their ERP credentials) ----
+  erpLoginUrl       String @default("")
+  erpUserField      String @default("username")  // body field name for the username
+  erpPassField      String @default("password")  // body field name for the password
+  erpUserPath       String @default("")          // where the user object is in the login response ("" = root)
+  erpLoginMap       String @default("{\"externalId\":\"id\",\"name\":\"name\",\"email\":\"email\",\"role\":\"role\",\"department\":\"department\",\"active\":\"active\"}")
+  erpOwnerRoles     String @default("admin,owner") // ERP role values that become the Owner here
+  erpLoginHeaders   String @default("{}")          // extra static headers, JSON (e.g. tenant id)
+}
+
+model Employee {
+  id          String   @id @default(auto()) @map("_id") @db.ObjectId
+  externalId  String   @unique // the ERP user / employee id
+  name        String
+  email       String   @default("")
+  phone       String   @default("")
+  department  String   @default("")
+  active      Boolean  @default(true)
+  faceStatus  String   @default("NONE") // NONE | PENDING | REGISTERED
+  faceData    String   @default("[]")   // JSON: number[][] embeddings
+  facePhoto   String   @default("")     // small JPEG thumbnail (base64) so the owner can verify who registered
+  faceNote    String   @default("")     // owner's reason when a registration is rejected
+  faceSubmittedAt DateTime?
+  faceEnrollCount Int      @default(0)   // how many of the stored templates came from enrollment (rest are adaptive)
+  faceSimilarTo   String   @default("")  // name of an existing employee this registration resembles (owner warning)
+  faceSimilarScore Float   @default(0)
+  createdAt   DateTime @default(now())
+  attendance  Attendance[]
+  faceRequests FaceResetRequest[]
+  leaves      LeaveRequest[]
+}
+
+model Attendance {
+  id            String    @id @default(auto()) @map("_id") @db.ObjectId
+  employeeId    String    @db.ObjectId
+  employee      Employee  @relation(fields: [employeeId], references: [id])
+  date          String    // YYYY-MM-DD in org timezone
+  punchIn       DateTime?
+  punchOut      DateTime?
+  status        String    @default("PRESENT") // PRESENT | LATE | ABSENT | LEAVE
+  lunchOut      DateTime?
+  lunchIn       DateTime?
+  lunchTakenMinutes Int   @default(0)
+  lunchOverMinutes  Int   @default(0)
+  halfLeave     String    @default("") // "" | FIRST | SECOND  (half-day leave on this date)
+  lateMinutes   Int       @default(0)
+  earlyMinutes  Int       @default(0)
+  workedMinutes Int       @default(0)
+  inLat         Float?
+  inLng         Float?
+  outLat        Float?
+  outLng        Float?
+  inScore       Float?
+  outScore      Float?
+  manual        Boolean   @default(false)
+  note          String    @default("")
+  @@unique([employeeId, date])
+  @@index([date])
+}
+
+model FaceResetRequest {
+  id         String   @id @default(auto()) @map("_id") @db.ObjectId
+  employeeId String   @db.ObjectId
+  employee   Employee @relation(fields: [employeeId], references: [id])
+  reason     String   @default("")
+  status     String   @default("PENDING") // PENDING | APPROVED | REJECTED
+  createdAt  DateTime @default(now())
+  resolvedAt DateTime?
+}
+
+// every face check (for tuning the threshold and spotting misuse)
+model FaceAttempt {
+  id         String   @id @default(auto()) @map("_id") @db.ObjectId
+  employeeId String   @db.ObjectId
+  type       String
+  ok         Boolean
+  reason     String   @default("")
+  score      Float    @default(0) // lowest frame score against the claimed employee
+  otherScore Float    @default(0) // best score against any other employee
+  createdAt  DateTime @default(now())
+  @@index([employeeId, createdAt])
+  @@index([createdAt])
+}
+
+model AuditLog {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  action    String
+  detail    String
+  createdAt DateTime @default(now())
+}
+
+model LeaveRequest {
+  id         String   @id @default(auto()) @map("_id") @db.ObjectId
+  employeeId String   @db.ObjectId
+  employee   Employee @relation(fields: [employeeId], references: [id])
+  fromDate   String   // YYYY-MM-DD
+  toDate     String
+  type       String   @default("CASUAL") // CASUAL | SICK | OTHER
+  halfDay    Boolean  @default(false)
+  halfSession String  @default("")   // FIRST (morning off) | SECOND (afternoon off)
+  days       Float    @default(0)    // working days this leave consumes (0.5 for half day)
+  daysJson   String   @default("{}") // days per leave-year, e.g. {"2026":2.5}
+  reason     String
+  status     String   @default("PENDING") // PENDING | APPROVED | REJECTED | CANCELLED
+  ownerNote  String   @default("")
+  createdAt  DateTime @default(now())
+  decidedAt  DateTime?
+  @@index([employeeId])
+  @@index([status])
+}
