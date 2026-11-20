@@ -10,5 +10,7 @@ export const MOCK_EMPLOYEES = people.map(([name, department, username], i) => ({
   email: `${username}@example.com`, phone: `90000000${String(i + 1).padStart(2, '0')}`, role: 'employee', active: true,
 }));
 export const MOCK_OWNER = { id: 'A001', name: 'The Boss', username: 'boss', department: 'Management', email: 'boss@example.com', phone: '', role: 'admin', active: true };
-export const MOCK_EMP_PASSWORD = 'pass123';
-export const MOCK_OWNER_PASSWORD = 'admin123';
+// Defaults are public (they are in the repo). When the mock ERP is enabled on a live server, override them with private values:
+//   MOCK_OWNER_PASSWORD (the demo owner "boss")  and  MOCK_EMPLOYEE_PASSWORD (all demo employees)
+export const MOCK_EMP_PASSWORD = process.env.MOCK_EMPLOYEE_PASSWORD || 'pass123';
+export const MOCK_OWNER_PASSWORD = process.env.MOCK_OWNER_PASSWORD || 'admin123';
