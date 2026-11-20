@@ -31,5 +31,5 @@ if (require.main === module) {
     // keep the face-check log for 90 days
     cron.schedule('58 23 * * *', async () => { const n = await prisma.faceAttempt.deleteMany({ where: { createdAt: { lt: new Date(Date.now() - 90 * 86400000) } } }); console.log('old face attempts removed', n.count); });
     cron.schedule('55 23 * * *', async () => { const s = await getSettings(); console.log('absent marked', await markAbsentees(), s.timezone); });
-  });
+  }).catch(e => { console.error('FATAL: server could not start:', e.message); process.exit(1); });
 }
