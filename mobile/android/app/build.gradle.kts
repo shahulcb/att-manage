@@ -55,6 +55,10 @@ android {
     buildTypes {
         release {
             signingConfig = if (keystorePropertiesFile.exists()) signingConfigs.getByName("release") else signingConfigs.getByName("debug")
+            // Do not shrink/obfuscate: R8 can break camera and ML Kit plugins that load classes dynamically, and
+            // such failures only show in release builds. A slightly larger APK is worth the reliability.
+            isMinifyEnabled = false
+            isShrinkResources = false
         }
     }
 }

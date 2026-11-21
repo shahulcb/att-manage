@@ -18,7 +18,7 @@ class _OwnerSettingsState extends State<OwnerSettings> {
   Set<int> days = {};
   bool quotaOn = false;
 
-  static const keys = ['orgName', 'officeLat', 'officeLng', 'radiusM', 'workStart', 'workEnd', 'graceMinutes', 'timezone', 'maxAccuracyM', 'lunchStart', 'lunchEnd', 'lunchMinutes', 'holidays', 'faceThreshold', 'faceMargin', 'leaveQuotaCasual', 'leaveQuotaSick', 'leaveQuotaOther', 'leaveYearStartMonth'];
+  static const keys = ['orgName', 'officeLat', 'officeLng', 'radiusM', 'workStart', 'workEnd', 'graceMinutes', 'timezone', 'maxAccuracyM', 'lunchStart', 'lunchEnd', 'lunchMinutes', 'holidays', 'faceThreshold', 'faceMargin', 'livenessActions', 'leaveQuotaCasual', 'leaveQuotaSick', 'leaveQuotaOther', 'leaveYearStartMonth'];
 
   @override
   void initState() { super.initState(); load(); }
@@ -58,7 +58,7 @@ class _OwnerSettingsState extends State<OwnerSettings> {
         'orgName': c['orgName']!.text.trim(), 'officeLat': lat, 'officeLng': lng, 'radiusM': n('radiusM'),
         'workStart': c['workStart']!.text.trim(), 'workEnd': c['workEnd']!.text.trim(), 'graceMinutes': n('graceMinutes'),
         'lunchStart': c['lunchStart']!.text.trim(), 'lunchEnd': c['lunchEnd']!.text.trim(), 'lunchMinutes': int.tryParse(c['lunchMinutes']!.text.trim()) ?? 60,
-        'holidays': c['holidays']!.text.replaceAll(' ', ''), 'faceThreshold': double.tryParse(c['faceThreshold']!.text.trim()) ?? 0.65, 'faceMargin': double.tryParse(c['faceMargin']!.text.trim()) ?? 0.05, 'leaveQuotaEnabled': quotaOn,
+        'holidays': c['holidays']!.text.replaceAll(' ', ''), 'faceThreshold': double.tryParse(c['faceThreshold']!.text.trim()) ?? 0.65, 'faceMargin': double.tryParse(c['faceMargin']!.text.trim()) ?? 0.05, 'livenessActions': (int.tryParse(c['livenessActions']!.text.trim()) ?? 1).clamp(1, 2), 'leaveQuotaEnabled': quotaOn,
         'leaveQuotaCasual': double.tryParse(c['leaveQuotaCasual']!.text.trim()) ?? 0, 'leaveQuotaSick': double.tryParse(c['leaveQuotaSick']!.text.trim()) ?? 0,
         'leaveQuotaOther': double.tryParse(c['leaveQuotaOther']!.text.trim()) ?? 0, 'leaveYearStartMonth': int.tryParse(c['leaveYearStartMonth']!.text.trim()) ?? 1, 'workDays': (days.toList()..sort()).join(','), 'timezone': c['timezone']!.text.trim(), 'maxAccuracyM': n('maxAccuracyM'),
       });
@@ -102,6 +102,7 @@ class _OwnerSettingsState extends State<OwnerSettings> {
         Expanded(child: _t('faceThreshold', 'Match strictness (0.40–0.90)', type: const TextInputType.numberWithOptions(decimal: true))), const SizedBox(width: 10),
         Expanded(child: _t('faceMargin', 'Look-alike margin (0–0.20)', type: const TextInputType.numberWithOptions(decimal: true))),
       ]),
+      _t('livenessActions', 'Random actions per punch: 1 (faster) or 2 (stricter)', type: TextInputType.number),
       const Text('Higher strictness = fewer wrong people accepted, but more genuine retries. Start at 0.65 and use Employees → Face checks to see real scores before changing it.', style: TextStyle(color: Colors.black54, fontSize: 12)),
       _h('Leave quota'),
       SwitchListTile(contentPadding: EdgeInsets.zero, title: const Text('Limit leave with a yearly quota'), subtitle: Text(quotaOn ? 'Requests over the balance are blocked' : 'Off: employees can take any amount of leave'), value: quotaOn, onChanged: (v) => setState(() => quotaOn = v)),

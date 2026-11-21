@@ -70,7 +70,7 @@ class _EmployeeHomeState extends State<EmployeeHome> with WidgetsBindingObserver
       final ch = await PunchService.challenge(type);
       if (!mounted) return;
       setState(() => working = false);
-      final r = await Navigator.push<ScanResult>(context, MaterialPageRoute(builder: (_) => ScanScreen(title: punchTitles[type]!, steps: punchSteps(ch['actions']))));
+      final r = await Navigator.push<ScanResult>(context, MaterialPageRoute(builder: (_) => ScanScreen(title: punchTitles[type]!, steps: punchSteps(ch['actions']), preCapture: true)));
       if (r == null || !mounted) return;
       setState(() => working = true);
       final o = await PunchService.send(type: type, fix: fix, challenge: ch, frames: r.embeddings, actions: r.actions);

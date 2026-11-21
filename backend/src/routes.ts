@@ -116,7 +116,7 @@ router.post('/me/face/register', emp, wrap(async (req, res) => {
 
 router.get('/me/punch-challenge', emp, wrap(async (req, res) => {
   const type = z.enum(['IN', 'OUT', 'LUNCH_OUT', 'LUNCH_IN']).parse(req.query.type);
-  res.json(issueChallenge(uid(req), type));
+  res.json(issueChallenge(uid(req), type, (await getSettings()).livenessActions));
 }));
 
 router.post('/me/face/reset-request', emp, wrap(async (req, res) => {
@@ -209,7 +209,7 @@ router.put('/owner/settings', owner, wrap(async (req, res) => {
     orgName: z.string().min(1), officeLat: z.number().min(-90).max(90).nullable(), officeLng: z.number().min(-180).max(180).nullable(),
     radiusM: z.number().int().min(20).max(5000), workStart: t, workEnd: t, graceMinutes: z.number().int().min(0).max(120),
     workDays: z.string().regex(/^[0-6](,[0-6])*$/), timezone: z.string().min(1), maxAccuracyM: z.number().int().min(10).max(500),
-    faceThreshold: z.number().min(0.4).max(0.9), faceMargin: z.number().min(0).max(0.2),
+    faceThreshold: z.number().min(0.4).max(0.9), faceMargin: z.number().min(0).max(0.2), livenessActions: z.number().int().min(1).max(2),
     leaveQuotaEnabled: z.boolean(), leaveQuotaCasual: z.number().min(0).max(366).multipleOf(0.5), leaveQuotaSick: z.number().min(0).max(366).multipleOf(0.5), leaveQuotaOther: z.number().min(0).max(366).multipleOf(0.5), leaveYearStartMonth: z.number().int().min(1).max(12),
     lunchStart: t, lunchEnd: t, lunchMinutes: z.number().int().min(5).max(240),
     holidays: z.string().regex(/^(\d{4}-\d{2}-\d{2}(,\s*\d{4}-\d{2}-\d{2})*)?$/, 'Holidays must be YYYY-MM-DD dates separated by commas'),

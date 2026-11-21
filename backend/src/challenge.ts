@@ -7,11 +7,11 @@ type C = { employeeId: string; type: string; actions: string[]; exp: number };
 const store = new Map<string, C>();
 const ACTIONS = ['BLINK', 'TURN', 'SMILE'];
 
-export function issueChallenge(employeeId: string, type: string) {
+export function issueChallenge(employeeId: string, type: string, count = 1) {
   const now = Date.now();
   for (const [k, v] of store) if (v.exp < now) store.delete(k);
   const shuffled = [...ACTIONS].sort(() => Math.random() - 0.5);
-  const c = { employeeId, type, actions: shuffled.slice(0, 2), exp: now + 120_000 };
+  const c = { employeeId, type, actions: shuffled.slice(0, Math.min(Math.max(count, 1), ACTIONS.length)), exp: now + 120_000 };
   const nonce = randomBytes(16).toString('hex');
   store.set(nonce, c);
   return { nonce, actions: c.actions };

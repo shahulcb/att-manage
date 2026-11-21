@@ -116,7 +116,13 @@ async function call(method: string, path: string, body?: any, token?: string) {
   assert.equal((await punchCall({ type: 'OUT', ...here, embedding: emb(1) }, tok)).json.code, 'NOT_IN');
 
   // ---- face check protections ----
-  assert.equal((await punchCall({ type: 'IN', ...here, embedding: emb(1), actions: ['BLINK'] }, tok)).json.code, 'LIVENESS_FAILED', 'wrong challenge actions');
+  // number of liveness actions per punch is a setting: 1 by default, 2 = stricter, other values refused
+  assert.equal((await call('GET', '/me/punch-challenge?type=IN', undefined, tok)).json.actions.length, 1, 'default: one action');
+  assert.equal((await call('PUT', '/owner/settings', { livenessActions: 3 }, ot)).status, 400);
+  assert.equal((await call('PUT', '/owner/settings', { livenessActions: 2 }, ot)).status, 200);
+  assert.equal((await call('GET', '/me/punch-challenge?type=IN', undefined, tok)).json.actions.length, 2, 'stricter: two actions');
+  assert.equal((await call('PUT', '/owner/settings', { livenessActions: 1 }, ot)).status, 200);
+  assert.equal((await punchCall({ type: 'IN', ...here, embedding: emb(1), actions: [] }, tok)).json.code, 'LIVENESS_FAILED', 'wrong challenge actions');
   assert.equal((await punchCall({ type: 'IN', ...here, frames: [[1, 2, 3], [1, 2, 3]] }, tok)).json.code, 'BAD_FACE_DATA');
   assert.equal((await punchCall({ type: 'IN', ...here, frames: [emb(1).map(x => x * 3), emb(1)] }, tok)).json.code, 'BAD_FACE_DATA', 'tampered vector');
   assert.equal((await punchCall({ type: 'IN', ...here, frames: [emb(1), emb(7)] }, tok)).json.code, 'FACE_INCONSISTENT', 'two different faces in one check');

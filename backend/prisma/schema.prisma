@@ -47,6 +47,7 @@ model Settings {
   // ---- leave module (standalone, not synced with the ERP) ----
   faceThreshold       Float   @default(0.65) // min cosine similarity to accept (higher = stricter)
   faceMargin          Float   @default(0.05) // another employee must score at least this much lower
+  livenessActions     Int     @default(1)    // random actions (blink / turn head / smile) asked per punch: 1 = fast, 2 = stricter
   leaveQuotaEnabled   Boolean @default(false) // false = no quota (unlimited)
   leaveQuotaCasual    Float   @default(12)
   leaveQuotaSick      Float   @default(12)

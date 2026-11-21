@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:io';
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -41,7 +40,6 @@ List<ScanStep> registerSteps() => const [
 
 /// Punch: photo, the actions the SERVER asked for (random each time), photo again.
 List<ScanStep> punchSteps(List actions) => [
-      const ScanStep(StepKind.straight),
       for (final a in actions) ScanStep(a == 'BLINK' ? StepKind.blink : a == 'SMILE' ? StepKind.smile : StepKind.turn),
       const ScanStep(StepKind.straight),
     ];
@@ -49,7 +47,9 @@ List<ScanStep> punchSteps(List actions) => [
 class ScanScreen extends StatefulWidget {
   final String title;
   final List<ScanStep> steps;
-  const ScanScreen({super.key, required this.title, required this.steps});
+  /// Punch mode: take the first photo silently as soon as the face is ready, so the person only does the action(s) and is done.
+  final bool preCapture;
+  const ScanScreen({super.key, required this.title, required this.steps, this.preCapture = false});
   @override
   State<ScanScreen> createState() => _ScanScreenState();
 }
@@ -62,6 +62,12 @@ class _ScanScreenState extends State<ScanScreen> {
   bool _eyesWereOpen = false, _eyesClosed = false;
   double _firstSide = 0;
   DateTime _cooldown = DateTime.now();
+  int _preOk = 0;             // consecutive ready frames before the silent first photo
+  int _frames = 0;
+  CameraImage? _last;         // newest camera frame: lets us capture even when live face detection is not working on this phone
+  String _diag = '';          // shown on screen in diagnostic builds (FACE_DEBUG)
+  int _okFrames = 0;          // consecutive frames that meet the step's conditions (auto-capture needs a steady pose)
+  bool _manual = false;       // "Take photo now" pressed: capture the next clear frame without waiting for the pose
   String _hint = 'Starting camera…';
   final _embeddings = <List<double>>[];
   final _actions = <String>[];
@@ -73,7 +79,22 @@ class _ScanScreenState extends State<ScanScreen> {
   void initState() {
     super.initState();
     _init();
-    _tick = Timer.periodic(const Duration(seconds: 1), (_) { if (mounted && !_done && !_capturing) setState(() {}); });
+    _tick = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted || _done || _capturing) return;
+      setState(() {});
+      // Fallback: live detection did not capture within 5 s -> try the newest frame directly (face is verified on the picture)
+      final i = _step.clamp(0, widget.steps.length - 1);
+      if (widget.preCapture && _embeddings.isEmpty && !widget.steps[i].capture && _last != null && DateTime.now().difference(_stepStart).inSeconds >= 5 && !DateTime.now().isBefore(_cooldown)) {
+        faceLog('fallback pre-capture from the newest frame');
+        _preCapture(_last!);
+        return;
+      }
+      if (widget.steps[i].capture && _last != null && DateTime.now().difference(_stepStart).inSeconds >= 5 && !DateTime.now().isBefore(_cooldown)) {
+        faceLog('fallback capture from the newest frame (step=${widget.steps[i].kind.name})');
+        if (kFaceDebug) _diag = 'fallback capture (live detection gave no result for 5s)';
+        _capture(_last!);
+      }
+    });
   }
 
   Future<void> _init() async {
@@ -84,12 +105,15 @@ class _ScanScreenState extends State<ScanScreen> {
       await c.initialize();
       if (!mounted) return;
       _cam = c;
+      faceLog('camera ${front.name} sensor=${front.sensorOrientation} preview=${c.value.previewSize} lens=${front.lensDirection} cams=${cams.length}');
       setState(() => _hint = widget.steps[0].label);
       await c.startImageStream(_onFrame);
     } on CameraException catch (e) {
+      faceLog('camera init CameraException ${e.code}: ${e.description}');
       if (!mounted) return;
       setState(() => _hint = e.code == 'CameraAccessDenied' ? 'Camera permission denied. Enable it in Settings.' : 'Camera error: ${e.description}');
-    } catch (_) {
+    } catch (e, st) {
+      faceLog('camera init failed: $e\n$st');
       if (mounted) setState(() => _hint = 'No camera available on this device');
     }
   }
@@ -97,22 +121,35 @@ class _ScanScreenState extends State<ScanScreen> {
   InputImage? _toInput(CameraImage img) {
     final cam = _cam!;
     final rot = InputImageRotationValue.fromRawValue(cam.description.sensorOrientation);
-    if (rot == null || img.format.group != ImageFormatGroup.nv21 || img.planes.length != 1) return null;
+    if (rot == null || (img.planes.length != 1 && img.planes.length != 3)) {
+      _diag = 'unsupported frame: planes=${img.planes.length} fmt=${img.format.group} rot=$rot';
+      if (_frames < 3) faceLog(_diag);
+      return null;
+    }
+    // repack to plain NV21 whatever layout the phone sends (single-plane NV21 or 3-plane YUV_420_888)
     return InputImage.fromBytes(
-      bytes: img.planes.first.bytes,
-      metadata: InputImageMetadata(size: Size(img.width.toDouble(), img.height.toDouble()), rotation: rot, format: InputImageFormat.nv21, bytesPerRow: img.planes.first.bytesPerRow),
+      bytes: frameToNv21(img),
+      metadata: InputImageMetadata(size: Size(img.width.toDouble(), img.height.toDouble()), rotation: rot, format: InputImageFormat.nv21, bytesPerRow: img.width),
     );
   }
 
-  void _resetStepState() { _eyesWereOpen = false; _eyesClosed = false; _stepStart = DateTime.now(); }
+  void _resetStepState() { _eyesWereOpen = false; _eyesClosed = false; _okFrames = 0; _manual = false; _stepStart = DateTime.now(); }
 
   Future<void> _onFrame(CameraImage image) async {
+    _last = image;
     if (_busy || _capturing || _done || DateTime.now().isBefore(_cooldown)) return;
     _busy = true;
     try {
+      _frames++;
       final input = _toInput(image);
       if (input == null) return;
       final faces = await _detector.processImage(input);
+      if (kFaceDebug && (_frames <= 2 || _frames % 5 == 0)) {
+        final fc = faces.length == 1 ? faces.first : null;
+        final t = 'f#$_frames ${image.width}x${image.height} planes=${image.planes.length} faces=${faces.length}${fc == null ? '' : ' y=${fc.headEulerAngleY?.toStringAsFixed(0)} x=${fc.headEulerAngleX?.toStringAsFixed(0)} z=${fc.headEulerAngleZ?.toStringAsFixed(0)} eyes=${fc.leftEyeOpenProbability?.toStringAsFixed(1)}/${fc.rightEyeOpenProbability?.toStringAsFixed(1)}'} step=${widget.steps[_step.clamp(0, widget.steps.length - 1)].kind.name} ok=$_okFrames';
+        if (mounted) setState(() => _diag = t);
+      }
+      if (_frames <= 2 || _frames % 15 == 0) faceLog('frame#$_frames ${image.width}x${image.height} fmt=${image.format.group} planes=${image.planes.length} faces=${faces.length}${faces.length == 1 ? ' y=${faces.first.headEulerAngleY?.toStringAsFixed(0)} eyes=${faces.first.leftEyeOpenProbability?.toStringAsFixed(2)} smile=${faces.first.smilingProbability?.toStringAsFixed(2)}' : ''} step=${widget.steps[_step.clamp(0, widget.steps.length - 1)].kind.name} okFrames=$_okFrames');
       if (!mounted) return;
       if (faces.isEmpty) { _setHint('No face found. Move closer.'); return; }
       if (faces.length > 1) { _setHint('Only one person should be in view.'); return; }
@@ -123,15 +160,24 @@ class _ScanScreenState extends State<ScanScreen> {
       final smile = f.smilingProbability ?? 0;
       final eyesOpen = l > 0.35 && r > 0.35;
 
+      if (widget.preCapture && _embeddings.isEmpty && !step.capture) {
+        final ready = y.abs() < 14 && (f.headEulerAngleX ?? 0).abs() < 16 && (f.headEulerAngleZ ?? 0).abs() < 14 && eyesOpen;
+        _preOk = ready ? _preOk + 1 : 0;
+        if (_preOk >= 2) { _preOk = 0; await _preCapture(image); } else { _setHint('Look at the camera'); }
+        return;
+      }
+
+      bool ok = false;
       switch (step.kind) {
         case StepKind.straight:
-          if (y.abs() < 14 && (f.headEulerAngleX ?? 0).abs() < 16 && (f.headEulerAngleZ ?? 0).abs() < 14 && eyesOpen) { await _capture(); } else { _setHint(step.label); }
+          ok = y.abs() < 14 && (f.headEulerAngleX ?? 0).abs() < 16 && (f.headEulerAngleZ ?? 0).abs() < 14 && eyesOpen;
         case StepKind.smileShot:
-          if (y.abs() < 14 && eyesOpen && smile > 0.25) { await _capture(); } else { _setHint(step.label); }
+          ok = y.abs() < 14 && eyesOpen && smile > 0.25;
         case StepKind.turnSide:
-          if (y.abs() > 15 && eyesOpen) { _firstSide = y; await _capture(); } else { _setHint(step.label); }
+          ok = y.abs() > 15 && eyesOpen;
+          if (ok) _firstSide = y;
         case StepKind.turnOtherSide:
-          if (y.abs() > 15 && y * _firstSide < 0 && eyesOpen) { await _capture(); } else { _setHint(step.label); }
+          ok = y.abs() > 15 && y * _firstSide < 0 && eyesOpen;
         case StepKind.blink:
           if (eyesOpen) {
             if (_eyesClosed) { _advanceAction(step); return; }
@@ -145,7 +191,16 @@ class _ScanScreenState extends State<ScanScreen> {
           if (smile > 0.6) { _advanceAction(step); return; }
           _setHint(step.label);
       }
-    } catch (_) {/* ignore frame errors */} finally { _busy = false; }
+      if (step.capture) {
+        _okFrames = (ok || _manual) ? _okFrames + 1 : 0;
+        if (_okFrames >= (_manual ? 1 : (widget.preCapture ? 2 : 3))) { _okFrames = 0; await _capture(image); }   // about a third of a second of steady pose
+        else if (ok) { _setHint('Hold still…'); }
+        else { _setHint(step.label); }
+      }
+    } catch (e, st) {
+      if (kFaceDebug && mounted) setState(() => _diag = 'frame error: ${e.runtimeType} $e');
+      if (_frames < 50 || _frames % 30 == 0) faceLog('frame error (frame#$_frames): $e\n$st');
+    } finally { _busy = false; }
   }
 
   void _advanceAction(ScanStep step) {
@@ -157,20 +212,46 @@ class _ScanScreenState extends State<ScanScreen> {
 
   void _setHint(String h) { if (h != _hint) setState(() => _hint = h); }
 
-  Future<void> _capture() async {
+  /// The silent first photo (punch mode): same checks as any capture, but no step is consumed.
+  Future<void> _preCapture(CameraImage image) async {
+    _capturing = true;
+    try {
+      final rot = InputImageRotationValue.fromRawValue(_cam!.description.sensorOrientation)?.rawValue ?? 0;
+      final cap = await FaceEmbedder.i.embedFrame(image, rot, frontal: true);
+      _embeddings.add(cap.embedding);
+      if (_photo.isEmpty) _photo = cap.thumbBase64;
+      HapticFeedback.selectionClick();
+      _resetStepState();
+      if (mounted) setState(() => _hint = widget.steps[_step].label);
+    } on FaceQualityError catch (e) {
+      faceLog('pre-capture rejected: ${e.message}');
+      _cooldown = DateTime.now().add(const Duration(milliseconds: 800));
+      _setHint(e.message);
+    } catch (e, st) {
+      faceLog('pre-capture exception: $e\n$st');
+      _cooldown = DateTime.now().add(const Duration(milliseconds: 1500));
+      _setHint('Could not read the camera frame. Trying again…');
+    } finally { _capturing = false; }
+  }
+
+  Future<void> _capture(CameraImage image) async {
     _capturing = true;
     final step = widget.steps[_step];
     try {
       setState(() => _hint = 'Hold still…');
-      final shot = await _cam!.takePicture();
+      final rot = InputImageRotationValue.fromRawValue(_cam!.description.sensorOrientation)?.rawValue ?? 0;
       FaceCapture cap;
+      faceLog('capture step=${step.kind.name} manual=$_manual');
       try {
-        cap = await FaceEmbedder.i.embedFile(shot.path, frontal: step.frontal);
+        cap = await FaceEmbedder.i.embedFrame(image, rot, frontal: step.frontal);
       } on FaceQualityError catch (e) {
-        _cooldown = DateTime.now().add(const Duration(milliseconds: 1200));
+        faceLog('rejected: ${e.message}');
+        _manual = false;
+        _cooldown = DateTime.now().add(const Duration(milliseconds: 1000));
         _setHint(e.message);
         return;
-      } finally { try { File(shot.path).deleteSync(); } catch (_) {} }
+      }
+      _manual = false;
       HapticFeedback.lightImpact();
       _embeddings.add(cap.embedding);
       if (_photo.isEmpty) _photo = cap.thumbBase64;
@@ -181,10 +262,15 @@ class _ScanScreenState extends State<ScanScreen> {
         if (mounted) Navigator.pop(context, ScanResult(_embeddings, _actions, _photo));
       } else {
         setState(() { _step++; _hint = widget.steps[_step].label; });
-        _cooldown = DateTime.now().add(const Duration(milliseconds: 600));
+        _cooldown = DateTime.now().add(const Duration(milliseconds: 700));
       }
-    } catch (_) {
-      _setHint('Capture failed, try again');
+    } catch (e, st) {
+      faceLog('capture exception: $e\n$st');
+      if (kFaceDebug && mounted) setState(() => _diag = 'capture error: ${e.runtimeType} $e');
+      // show the real reason (and wait a moment) instead of retrying in a tight loop
+      _manual = false;
+      _cooldown = DateTime.now().add(const Duration(milliseconds: 1500));
+      _setHint('Could not read the camera frame (${e.runtimeType}). Trying again…');
     } finally { _capturing = false; }
   }
 
@@ -264,8 +350,8 @@ class _ScanScreenState extends State<ScanScreen> {
                     SizedBox(height: 52, child: !_capturing && !_done && widget.steps[_step.clamp(0, widget.steps.length - 1)].capture && DateTime.now().difference(_stepStart).inSeconds >= 6
                         ? Center(child: OutlinedButton.icon(
                             style: OutlinedButton.styleFrom(foregroundColor: Colors.white, side: const BorderSide(color: Colors.white54), minimumSize: const Size(190, 44)),
-                            onPressed: _capture, icon: const Icon(Icons.camera_alt_outlined), label: const Text('Take photo now')))
-                        : const Center(child: Text('Face the light. Only you in view.', style: TextStyle(color: Colors.white38, fontSize: 12)))),
+                            onPressed: () { if (_last != null && !_capturing) _capture(_last!); }, icon: const Icon(Icons.camera_alt_outlined), label: const Text('Take photo now')))
+                        : Center(child: Text(kFaceDebug && _diag.isNotEmpty ? _diag : 'Face the light. Only you in view.', textAlign: TextAlign.center, maxLines: 3, style: TextStyle(color: kFaceDebug ? C.accent : Colors.white38, fontSize: kFaceDebug ? 11 : 12)))),
                   ]),
                 ),
               ]),
